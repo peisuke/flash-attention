@@ -179,28 +179,34 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
 
 template<typename T, int Headdim, bool Is_causal>
 void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream) {
-    constexpr static int kBlockM = 64;  // Fixed for all head dimensions
-    // TD [2023-08-28]: nvcc segfaults for headdim 96 with block size 64 x 256,
-    // and for headdim 192 with block size 64 x 128.
-    constexpr static int kBlockN = Headdim <= 64 ? 256 : (Headdim <= 128 ? 128 : 64);
-    // Check at compile time if kBlockN=64 + PV buffer (for SM70) exceeds V100's 96KB.
-    // PV buffer = kBlockM * kBlockN * sizeof(half) = kBlockM * kBlockN * 2.
-    constexpr int smem_with_pvbuf = 2 * Headdim * (kBlockM + 2 * kBlockN) + kBlockM * kBlockN * 2;
-    if constexpr (smem_with_pvbuf > 98304) {
-        // Only hdim=256 enters here (smem = 104KB with PV buffer).
-        // V100 needs kBlockN=32 to fit in 96KB.
-        int device;
-        cudaGetDevice(&device);
-        int max_smem_per_block;
-        cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-        constexpr int smem_no_pvbuf = 2 * Headdim * (kBlockM + 2 * kBlockN);
-        if (max_smem_per_block <= smem_no_pvbuf) {
-            run_flash_splitkv_fwd<Flash_fwd_kernel_traits<Headdim, kBlockM, 32, 4, false, false, T>, Is_causal>(params, stream);
+    auto [cc_major_skv, cc_minor_skv] = get_compute_capability(get_current_device());
+#ifdef FLASH_ATTN_SM70_ONLY
+    // SM70-only build: skip SM80+ template instantiation to halve compilation time.
+    (void)cc_major_skv;
+    {
+#else
+    if (cc_major_skv < 8) {
+#endif
+        // SM70: The splitkv kernel with kBlockM=64 (4 warps, 128 threads) causes catastrophic
+        // register spilling on Volta (REG:86-94, STACK:2-4KB) because the SM70 8x8x4 MMA atom
+        // uses 8 C values per thread (vs 4 for SM75+), doubling the register pressure.
+        // Fix: Use kBlockM=32 with 2 warps (64 threads) to halve the MMA register requirements.
+        // kBlockN=64 is kept to allow page_block_size=64 for paged KV cache.
+        constexpr static int kBlockM_sm70 = 32;
+        if constexpr (Headdim > 224) {
+            run_flash_splitkv_fwd<Flash_fwd_kernel_traits<Headdim, kBlockM_sm70, 32, 2, false, false, T>, Is_causal>(params, stream);
         } else {
-            run_flash_splitkv_fwd<Flash_fwd_kernel_traits<Headdim, kBlockM, kBlockN, 4, false, false, T>, Is_causal>(params, stream);
+            run_flash_splitkv_fwd<Flash_fwd_kernel_traits<Headdim, kBlockM_sm70, 64, 2, false, false, T>, Is_causal>(params, stream);
         }
+#ifndef FLASH_ATTN_SM70_ONLY
     } else {
+        constexpr static int kBlockM = 64;  // Fixed for all head dimensions
+        // SM80+: existing logic.
+        // TD [2023-08-28]: nvcc segfaults for headdim 96 with block size 64 x 256,
+        // and for headdim 192 with block size 64 x 128.
+        constexpr static int kBlockN = Headdim <= 64 ? 256 : (Headdim <= 128 ? 128 : 64);
         run_flash_splitkv_fwd<Flash_fwd_kernel_traits<Headdim, kBlockM, kBlockN, 4, false, false, T>, Is_causal>(params, stream);
+#endif
     }
 }
 

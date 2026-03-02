@@ -1548,7 +1548,8 @@ def flash_attn_with_kvcache(
         q: (batch_size, seqlen, nheads, headdim)
         k_cache: (batch_size_cache, seqlen_cache, nheads_k, headdim) if there's no block_table,
             or (num_blocks, page_block_size, nheads_k, headdim) if there's a block_table (i.e. paged KV cache)
-            page_block_size must be a multiple of 256.
+            page_block_size must be a multiple of the kernel's block_n
+            (e.g. 64 on V100/SM70, up to 256 on A100+/SM80+).
         v_cache: (batch_size_cache, seqlen_cache, nheads_k, headdim) if there's no block_table,
             or (num_blocks, page_block_size, nheads_k, headdim) if there's a block_table (i.e. paged KV cache)
         k [optional]: (batch_size, seqlen_new, nheads_k, headdim). If not None, we concatenate

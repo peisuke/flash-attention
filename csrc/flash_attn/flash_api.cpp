@@ -302,39 +302,28 @@ std::tuple<at::Tensor, at::Tensor> set_params_splitkv(Flash_fwd_params &params, 
     const int num_splits, const int num_sm, struct c10::TensorOptions opts) {
 
     // This needs to match with run_mha_fwd_splitkv_dispatch
-    int block_n = head_size <= 64 ? 256 : (head_size <= 128 ? 128 : 64);
-    // V100 (96KB smem): For hdim=256, kBlockN=64 + SM70 PV buffer exceeds 96KB.
-    if (head_size > 128 && block_n > 32) {
-        int device;
-        cudaGetDevice(&device);
-        int max_smem;
-        cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-        if (max_smem <= 2 * head_size * (64 + 2 * 64)) {
-            block_n = 32;
-        }
+    auto [cc_major_bn, cc_minor_bn] = get_compute_capability(get_current_device());
+    int block_n;
+    if (cc_major_bn < 8) {
+        // SM70: kBlockN=64 for all hdims (hdim>224 uses 32 for smem constraints)
+        block_n = head_size > 224 ? 32 : 64;
+    } else {
+        block_n = head_size <= 64 ? 256 : (head_size <= 128 ? 128 : 64);
     }
     const int num_n_blocks = (max_seqlen_k + block_n - 1) / block_n;
-    // Technically kBlockM = 64 only for the splitKV kernels, not the standard kernel.
-    // In any case we don't expect seqlen_q to be larger than 64 for inference.
-    const int num_m_blocks = (max_seqlen_q + 64 - 1) / 64;
+    // SM70 splitkv uses kBlockM=32 (2 warps, 64 threads) to avoid register spilling.
+    // SM80+ uses kBlockM=64 (4 warps, 128 threads).
+    const int block_m = cc_major_bn < 8 ? 32 : 64;
+    const int num_threads = cc_major_bn < 8 ? 64 : 128;
+    const int num_m_blocks = (max_seqlen_q + block_m - 1) / block_m;
     params.num_splits = num_splits;
     at::Tensor softmax_lse_accum;
     at::Tensor out_accum;
 
     if (p_dropout == 0.0f) {  // SplitKV is not implemented for dropout
         if (num_splits < 1) {
-            // We multiply number of SMs by 2 to hard-code the fact that we're using 128 threads per block.
-            params.num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks, num_sm * 2, num_n_blocks, 128);
-        }
-        // V100 (SM70): splitkv kernel not yet validated on SM70; force single split
-        if (params.num_splits > 1) {
-            int dev;
-            cudaGetDevice(&dev);
-            int cc_major;
-            cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor, dev);
-            if (cc_major < 8) {
-                params.num_splits = 1;
-            }
+            // We multiply number of SMs by (128/num_threads*2) to account for thread count.
+            params.num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks, num_sm * 2 * 128 / num_threads, num_n_blocks, 128);
         }
         if (params.num_splits > 1) {
             softmax_lse_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
@@ -618,7 +607,16 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
     const int num_blocks = !paged_KV ? 0 : k.size(0);
     const int page_block_size = !paged_KV ? 1 : k.size(1);
-    TORCH_CHECK(!paged_KV || page_block_size % 256 == 0, "Paged KV cache block size must be divisible by 256");
+    if (paged_KV) {
+        int block_n_varlen;
+        if (cc_major < 8) {
+            block_n_varlen = head_size > 224 ? 32 : 64;
+        } else {
+            block_n_varlen = head_size <= 64 ? 256 : (head_size <= 128 ? 128 : 64);
+        }
+        TORCH_CHECK(page_block_size % block_n_varlen == 0,
+            "Paged KV cache block size must be divisible by ", block_n_varlen);
+    }
 
     if (max_seqlen_q == 1 && !alibi_slopes_.has_value()) { is_causal = false; }  // causal=true is the same as causal=false in this case
     if (is_causal) { window_size_right = 0; }
@@ -1325,7 +1323,16 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
     const int num_blocks = !paged_KV ? 0 : kcache.size(0);
     const int page_block_size = !paged_KV ? 1 : kcache.size(1);
-    TORCH_CHECK(!paged_KV || page_block_size % 256 == 0, "Paged KV cache block size must be divisible by 256");
+    if (paged_KV) {
+        int block_n_kvc;
+        if (cc_major < 8) {
+            block_n_kvc = head_size_og > 224 ? 32 : 64;
+        } else {
+            block_n_kvc = head_size_og <= 64 ? 256 : (head_size_og <= 128 ? 128 : 64);
+        }
+        TORCH_CHECK(page_block_size % block_n_kvc == 0,
+            "Paged KV cache block size must be divisible by ", block_n_kvc);
+    }
     const int seqlen_k = !paged_KV ? kcache.size(1) : max_num_blocks_per_seq * page_block_size;
     const int num_heads_k = kcache.size(2);
     const int batch_size_c = !paged_KV ? kcache.size(0) : batch_size;
@@ -1514,6 +1521,62 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
+
+    // SM70 workaround: The splitkv kernel with Append_KV=true generates incorrect code on
+    // Volta due to register spilling (STACK:472 bytes). The compiler's spill logic corrupts
+    // the attention computation for most head dimensions (d != 64).
+    // Workaround: perform the KV append on the host side, then run the kernel with Append_KV=false.
+    // This only applies when rotary_dim == 0 (no rotary embedding), which is the common case
+    // for vLLM serving where rotary is applied before calling flash_attn.
+    at::Tensor seqlens_k_updated;
+    bool did_sm70_preappend = false;
+    if (cc_major < 8 && k_.has_value() && params.rotary_dim == 0) {
+        auto seqlens_k_tensor = seqlens_k_.value();
+        int seqlen_knew = k_padded.size(1);
+
+        if (!paged_KV) {
+            // Contiguous cache: scatter new KV to the right positions
+            auto seqlens_cpu = seqlens_k_tensor.to(torch::kCPU, /*non_blocking=*/false);
+            auto seqlens_acc = seqlens_cpu.accessor<int, 1>();
+            for (int b = 0; b < batch_size; b++) {
+                int sl = seqlens_acc[b];
+                // kcache_padded shape: (batch_size, seqlen_k, num_heads_k, head_size)
+                kcache_padded.index({b, torch::indexing::Slice(sl, sl + seqlen_knew)})
+                    .copy_(k_padded.index({b}));
+                vcache_padded.index({b, torch::indexing::Slice(sl, sl + seqlen_knew)})
+                    .copy_(v_padded.index({b}));
+            }
+        } else {
+            // Paged cache: need block_table lookup for each token position
+            auto seqlens_cpu = seqlens_k_tensor.to(torch::kCPU, /*non_blocking=*/false);
+            auto seqlens_acc = seqlens_cpu.accessor<int, 1>();
+            auto bt_cpu = block_table.to(torch::kCPU, /*non_blocking=*/false);
+            auto bt_acc = bt_cpu.accessor<int, 2>();
+            for (int b = 0; b < batch_size; b++) {
+                int sl = seqlens_acc[b];
+                for (int j = 0; j < seqlen_knew; j++) {
+                    int pos = sl + j;
+                    int page_idx = pos / page_block_size;
+                    int page_offset = pos % page_block_size;
+                    int phys_page = bt_acc[b][page_idx];
+                    kcache_padded.index({phys_page, page_offset})
+                        .copy_(k_padded.index({b, j}));
+                    vcache_padded.index({phys_page, page_offset})
+                        .copy_(v_padded.index({b, j}));
+                }
+            }
+        }
+
+        // Create updated seqlens (don't modify user's tensor)
+        seqlens_k_updated = seqlens_k_tensor + seqlen_knew;
+        params.cu_seqlens_k = static_cast<int *>(seqlens_k_updated.data_ptr());
+
+        // Clear new KV params so kernel runs with Append_KV=false
+        params.knew_ptr = nullptr;
+        params.vnew_ptr = nullptr;
+        params.seqlen_knew = 0;
+        did_sm70_preappend = true;
+    }
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     // Only split kernel supports appending to KV cache, or indexing to the cache with cache_batch_idx,
