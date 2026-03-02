@@ -55,11 +55,12 @@ COPY benchmarks/v100_vllm_serving/vllm_flash_attn_shim.py /tmp/vllm/vllm/vllm_fl
 RUN python -c "\
 from vllm.vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache; \
 print('Patch 2/3: vllm_flash_attn shim OK')"
-# 3. Allow block_size=256 for SM70 paged KV cache (default: 8,16,32 only)
-RUN sed -i "s/choices=\[8, 16, 32\]/choices=[8, 16, 32, 256]/" \
+# 3. Allow block_size=64 for SM70 paged KV cache (vLLM default: 8,16,32)
+#    vLLM v0.6.5 has choices=[8, 16, 32, 256] — add 64 for SM70 splitkv kBlockN=64.
+RUN sed -i "s/choices=\[8, 16, 32, 256\]/choices=[8, 16, 32, 64, 256]/" \
     /tmp/vllm/vllm/engine/arg_utils.py && \
-    grep -q '256' /tmp/vllm/vllm/engine/arg_utils.py && \
-    echo "Patch 3/3: block_size=256 allowed"
+    grep -q '64' /tmp/vllm/vllm/engine/arg_utils.py && \
+    echo "Patch 3/3: block_size=64 allowed"
 
 # Verify full environment
 RUN python -c "\

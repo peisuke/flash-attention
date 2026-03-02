@@ -163,9 +163,9 @@ class VLLMServer:
             "--disable-frontend-multiprocessing",
             "--enforce-eager",
         ]
-        # FLASH_ATTN on SM70 requires page block_size=256 for KV cache
+        # FLASH_ATTN on SM70 requires page block_size divisible by kBlockN (64)
         if self.backend == "FLASH_ATTN":
-            cmd.extend(["--block-size", "256"])
+            cmd.extend(["--block-size", "64"])
 
         print(f"  Starting vLLM server with backend={self.backend} ...")
         print(f"  Command: {' '.join(cmd)}")

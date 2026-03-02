@@ -7,93 +7,97 @@
 - **PyTorch**: 2.6.0a0+df5bbc0 (NGC 24.11)
 - **CUDA**: 12.6
 - **Settings**: `--max-model-len 4096`, `--gpu-memory-utilization 0.9`, `--enforce-eager`
-- **Flash Attention**: SM70-compatible build with `--block-size 256` (required for paged KV cache)
-- **xFormers**: v0.0.29.post2 (CUTLASS backend)
+- **Flash Attention**: SM70-compatible build with `--block-size 64` (SM70 splitkv kBlockN=64)
+- **xFormers**: v0.0.29.post2 (CUTLASS backend, block_size=16)
 - **Requests per scenario**: 32
 
 ## Summary
 
-| Metric | FLASH_ATTN (SM70) | XFORMERS | XFORMERS Speedup |
+| Metric | FLASH_ATTN (bs=64) | XFORMERS (bs=16) | XFORMERS Speedup |
 |--------|-------------------|----------|-------------------|
-| Avg TTFT | 1200ms | 862ms | 1.39x |
-| Avg TPOT | 57.1ms | 32.9ms | 1.74x |
-| Avg Throughput | 91.3 tok/s | 155.7 tok/s | 1.71x |
+| Avg TTFT | 976ms | 876ms | 1.10x |
+| Avg TPOT | 37.8ms | 33.1ms | 1.14x |
+| Avg Throughput | 133.2 tok/s | 154.8 tok/s | 1.16x |
+
+Previous results with `block_size=256`: TPOT 1.74x gap, Throughput 1.71x gap.
+With `block_size=64`: TPOT 1.14x gap, Throughput 1.16x gap — **major improvement**.
 
 ## Detailed Results
 
-### FLASH_ATTN (SM70)
+### FLASH_ATTN (SM70, block_size=64)
 
 | Workload | Conc | OK | TTFT avg(ms) | TTFT p99(ms) | TPOT(ms) | Tput(tok/s) | Req/s |
 |----------|------|----|--------------|--------------|----------|-------------|-------|
-| short (128/128) | 1 | 32/32 | 62 | 73 | 27.1 | 36.5 | 0.29 |
-| short (128/128) | 2 | 32/32 | 90 | 123 | 29.1 | 67.5 | 0.53 |
-| short (128/128) | 4 | 32/32 | 232 | 1223 | 33.7 | 113.5 | 0.89 |
-| short (128/128) | 8 | 32/32 | 209 | 250 | 41.4 | 187.1 | 1.46 |
-| short (128/128) | 16 | 32/32 | 1042 | 1847 | 56.5 | 249.3 | 1.95 |
-| medium (512/256) | 1 | 32/32 | 114 | 116 | 30.0 | 33.0 | 0.13 |
-| medium (512/256) | 2 | 32/32 | 171 | 229 | 32.7 | 60.1 | 0.23 |
-| medium (512/256) | 4 | 32/32 | 336 | 410 | 40.7 | 95.5 | 0.37 |
-| medium (512/256) | 8 | 32/32 | 697 | 784 | 56.4 | 135.8 | 0.53 |
-| medium (512/256) | 16 | 32/32 | 1299 | 1994 | 82.7 | 182.9 | 0.71 |
-| long (1024/512) | 1 | 32/32 | 220 | 224 | 35.3 | 28.0 | 0.05 |
-| long (1024/512) | 2 | 32/32 | 329 | 441 | 38.0 | 51.8 | 0.10 |
-| long (1024/512) | 4 | 32/32 | 678 | 836 | 50.1 | 77.9 | 0.15 |
-| long (1024/512) | 8 | 32/32 | 1098 | 1670 | 75.2 | 103.7 | 0.20 |
-| long (1024/512) | 16 | 32/32 | 2170 | 3721 | 114.7 | 134.7 | 0.26 |
-| very_long (2048/256) | 1 | 32/32 | 459 | 462 | 42.9 | 22.4 | 0.09 |
-| very_long (2048/256) | 2 | 32/32 | 689 | 924 | 46.3 | 41.0 | 0.16 |
-| very_long (2048/256) | 4 | 32/32 | 1147 | 1840 | 66.5 | 56.5 | 0.22 |
-| very_long (2048/256) | 8 | 32/32 | 2062 | 3674 | 107.6 | 69.4 | 0.27 |
-| very_long (2048/256) | 16 | 32/32 | 10885 | 41150 | 134.1 | 78.9 | 0.31 |
+| short (128/128) | 1 | 32/32 | 61 | 76 | 26.8 | 37.0 | 0.29 |
+| short (128/128) | 2 | 32/32 | 91 | 122 | 28.1 | 69.8 | 0.55 |
+| short (128/128) | 4 | 32/32 | 175 | 581 | 28.5 | 134.8 | 1.05 |
+| short (128/128) | 8 | 32/32 | 756 | 2690 | 30.5 | 221.3 | 1.73 |
+| short (128/128) | 16 | 32/32 | 856 | 1412 | 34.7 | 388.9 | 3.04 |
+| medium (512/256) | 1 | 32/32 | 113 | 115 | 26.2 | 37.7 | 0.15 |
+| medium (512/256) | 2 | 32/32 | 171 | 228 | 28.5 | 68.8 | 0.27 |
+| medium (512/256) | 4 | 32/32 | 334 | 409 | 30.4 | 126.4 | 0.49 |
+| medium (512/256) | 8 | 32/32 | 699 | 787 | 35.4 | 210.5 | 0.82 |
+| medium (512/256) | 16 | 32/32 | 1086 | 1550 | 47.6 | 310.0 | 1.21 |
+| long (1024/512) | 1 | 32/32 | 219 | 221 | 26.7 | 36.9 | 0.07 |
+| long (1024/512) | 2 | 32/32 | 330 | 443 | 29.4 | 66.8 | 0.13 |
+| long (1024/512) | 4 | 32/32 | 679 | 834 | 33.7 | 114.3 | 0.22 |
+| long (1024/512) | 8 | 32/32 | 1084 | 1659 | 44.3 | 172.8 | 0.34 |
+| long (1024/512) | 16 | 32/32 | 1949 | 3288 | 62.7 | 241.1 | 0.47 |
+| very_long (2048/256) | 1 | 32/32 | 458 | 462 | 26.6 | 35.3 | 0.14 |
+| very_long (2048/256) | 2 | 32/32 | 686 | 924 | 32.4 | 57.2 | 0.22 |
+| very_long (2048/256) | 4 | 32/32 | 1143 | 1832 | 41.0 | 88.4 | 0.35 |
+| very_long (2048/256) | 8 | 32/32 | 2057 | 3653 | 60.5 | 117.1 | 0.46 |
+| very_long (2048/256) | 16 | 32/32 | 6575 | 26505 | 82.0 | 128.5 | 0.50 |
 
-### XFORMERS (CUTLASS)
+### XFORMERS (CUTLASS, block_size=16)
 
 | Workload | Conc | OK | TTFT avg(ms) | TTFT p99(ms) | TPOT(ms) | Tput(tok/s) | Req/s |
 |----------|------|----|--------------|--------------|----------|-------------|-------|
-| short (128/128) | 1 | 32/32 | 60 | 73 | 25.3 | 39.2 | 0.31 |
-| short (128/128) | 2 | 32/32 | 90 | 120 | 28.0 | 70.2 | 0.55 |
-| short (128/128) | 4 | 32/32 | 131 | 163 | 28.6 | 136.0 | 1.06 |
-| short (128/128) | 8 | 32/32 | 218 | 249 | 29.5 | 257.9 | 2.01 |
-| short (128/128) | 16 | 32/32 | 401 | 455 | 31.8 | 460.4 | 3.60 |
-| medium (512/256) | 1 | 32/32 | 110 | 112 | 28.2 | 35.0 | 0.14 |
-| medium (512/256) | 2 | 32/32 | 165 | 222 | 29.0 | 67.7 | 0.26 |
-| medium (512/256) | 4 | 32/32 | 329 | 402 | 29.3 | 131.1 | 0.51 |
-| medium (512/256) | 8 | 32/32 | 1182 | 3039 | 31.6 | 221.8 | 0.87 |
-| medium (512/256) | 16 | 32/32 | 1072 | 1540 | 37.8 | 382.5 | 1.49 |
-| long (1024/512) | 1 | 32/32 | 209 | 211 | 27.6 | 35.8 | 0.07 |
-| long (1024/512) | 2 | 32/32 | 314 | 421 | 28.5 | 68.8 | 0.13 |
-| long (1024/512) | 4 | 32/32 | 647 | 798 | 29.5 | 130.1 | 0.25 |
-| long (1024/512) | 8 | 32/32 | 1131 | 1989 | 34.7 | 217.0 | 0.42 |
-| long (1024/512) | 16 | 32/32 | 1859 | 3130 | 45.0 | 329.3 | 0.64 |
-| very_long (2048/256) | 1 | 32/32 | 419 | 421 | 27.6 | 34.3 | 0.13 |
-| very_long (2048/256) | 2 | 32/32 | 629 | 839 | 29.3 | 63.2 | 0.25 |
-| very_long (2048/256) | 4 | 32/32 | 1048 | 1671 | 33.9 | 105.6 | 0.41 |
-| very_long (2048/256) | 8 | 32/32 | 1882 | 3342 | 44.6 | 154.6 | 0.60 |
-| very_long (2048/256) | 16 | 32/32 | 5342 | 19279 | 57.6 | 173.8 | 0.68 |
+| short (128/128) | 1 | 32/32 | 68 | 341 | 26.6 | 37.1 | 0.29 |
+| short (128/128) | 2 | 32/32 | 89 | 118 | 27.8 | 70.6 | 0.55 |
+| short (128/128) | 4 | 32/32 | 210 | 979 | 28.9 | 131.9 | 1.03 |
+| short (128/128) | 8 | 32/32 | 219 | 248 | 29.7 | 256.4 | 2.00 |
+| short (128/128) | 16 | 32/32 | 406 | 455 | 31.8 | 460.6 | 3.60 |
+| medium (512/256) | 1 | 32/32 | 110 | 112 | 28.1 | 35.2 | 0.14 |
+| medium (512/256) | 2 | 32/32 | 166 | 221 | 29.4 | 66.8 | 0.26 |
+| medium (512/256) | 4 | 32/32 | 327 | 402 | 29.9 | 128.8 | 0.50 |
+| medium (512/256) | 8 | 32/32 | 1298 | 3116 | 31.4 | 220.0 | 0.86 |
+| medium (512/256) | 16 | 32/32 | 1065 | 1530 | 37.8 | 382.7 | 1.49 |
+| long (1024/512) | 1 | 32/32 | 208 | 211 | 28.1 | 35.1 | 0.07 |
+| long (1024/512) | 2 | 32/32 | 314 | 420 | 28.6 | 68.6 | 0.13 |
+| long (1024/512) | 4 | 32/32 | 645 | 795 | 29.7 | 129.3 | 0.25 |
+| long (1024/512) | 8 | 32/32 | 1038 | 1587 | 35.0 | 216.7 | 0.42 |
+| long (1024/512) | 16 | 32/32 | 1850 | 3136 | 45.1 | 329.2 | 0.64 |
+| very_long (2048/256) | 1 | 32/32 | 416 | 420 | 28.6 | 33.2 | 0.13 |
+| very_long (2048/256) | 2 | 32/32 | 626 | 837 | 30.5 | 61.0 | 0.24 |
+| very_long (2048/256) | 4 | 32/32 | 1043 | 1668 | 34.1 | 105.1 | 0.41 |
+| very_long (2048/256) | 8 | 32/32 | 1876 | 3333 | 44.2 | 155.6 | 0.61 |
+| very_long (2048/256) | 16 | 32/32 | 5548 | 19667 | 57.7 | 172.3 | 0.67 |
 
 ## Analysis
 
-### Why XFORMERS is faster in vLLM serving on V100
+### block_size=64 vs block_size=256 improvement
 
-1. **KV Cache Block Size**: Flash Attention SM70 requires `block_size=256` for paged KV cache
-   (the page table dimension must be divisible by the attention block size). XFORMERS uses
-   `block_size=16` (default). The 16x difference means FLASH_ATTN wastes significantly more
-   memory on partially-filled KV cache blocks, reducing the effective batch size for continuous
-   batching.
+The SM70 splitkv kernel with kBlockN=64 allows `page_block_size=64` (previously required 256).
+This reduced the throughput gap from **1.71x to 1.16x** (averaged across all scenarios).
 
-2. **Memory Efficiency**: With `block_size=256`, each KV cache block allocates memory for 256
-   tokens even if only 1 token is stored. This severely limits the number of concurrent
-   sequences that can fit in GPU memory, which explains the disproportionate throughput gap
-   at high concurrency.
+| Concurrency | FLASH_ATTN tok/s (bs=64) | XFORMERS tok/s (bs=16) | Ratio |
+|-------------|-------------------------|----------------------|-------|
+| 1 (avg) | 36.7 | 35.2 | **0.96x (FA faster)** |
+| 2 (avg) | 65.7 | 66.8 | 1.02x |
+| 4 (avg) | 116.0 | 123.8 | 1.07x |
+| 8 (avg) | 180.4 | 212.2 | 1.18x |
+| 16 (avg) | 267.1 | 336.2 | 1.26x |
 
-3. **Raw Kernel Speed**: The earlier microbenchmark (`benchmarks/v100_comparison/`) showed
-   flash_attn and xFormers have comparable raw attention kernel speed. The serving-level gap
-   is primarily a system-level issue from KV cache inefficiency, not kernel performance.
+### Remaining gap at high concurrency
+
+At concurrency 16, xFormers is still ~1.2-1.4x faster due to block_size 16 vs 64 (4x finer
+KV cache granularity). This means xFormers wastes less memory on partially-filled cache blocks,
+allowing more concurrent sequences to fit in GPU memory.
 
 ### Key Takeaway
 
-While flash-attn SM70 produces correct results and works end-to-end in vLLM serving, the
-`block_size=256` constraint makes it less practical for production serving compared to
-xFormers on V100. The primary value of flash-attn SM70 support is for training workloads
-(where paged KV cache is not used) and for applications that don't require high-concurrency
-serving.
+With the splitkv kBlockN=64 fix, flash_attn SM70 is now practical for vLLM serving:
+- **Low concurrency (1-2)**: flash_attn matches or slightly beats xFormers
+- **High concurrency (8-16)**: xFormers has ~20% advantage from finer KV cache granularity
+- **Training**: flash_attn remains the best choice (no paged KV, fastest backward)
